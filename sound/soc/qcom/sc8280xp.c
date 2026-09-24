@@ -117,6 +117,8 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	struct qcom_snd_tdm_slot_cfg *codec_cfg __free(kfree) =
 		kcalloc(rtd->dai_link->num_codecs, sizeof(*codec_cfg), GFP_KERNEL);
 	int bclk_freq;
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int ret;
 	int i;
 
@@ -129,7 +131,7 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	if (!cpu_cfg.slots)
 		return 0;
 
-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+	ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 	if (ret && ret != -ENOTSUPP)
 		return ret;
 
@@ -243,8 +245,7 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 		break;
 	}
 
-
-	return 0;
+	return qcom_snd_be_hw_params_fixup(rtd, params);
 }
 
 static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
@@ -254,6 +255,8 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int mclk_freq = sc8280xp_get_mclk_freq(params);
 	int bclk_freq = sc8280xp_get_bclk_freq(params);
 	int ret;
@@ -263,11 +266,11 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	case QUINARY_MI2S_RX ... QUINARY_MI2S_TX:
 	case SENARY_MI2S_RX ... SENARY_MI2S_TX:
 	case LPI_MI2S_RX_0 ... LPI_MI2S_TX_4:
-		ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 		if (ret && ret != -ENOTSUPP)
 			return ret;
 
-		if (data->priv->codec_dai_fmt) {
+		if (!rtd->dai_link->dai_fmt && data->priv->codec_dai_fmt) {
 			ret = snd_soc_dai_set_fmt(codec_dai,
 						  data->priv->codec_dai_fmt);
 			if (ret && ret != -ENOTSUPP)
