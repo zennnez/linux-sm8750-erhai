@@ -41,9 +41,16 @@
 	sound {
 		compatible = "qcom,sm8750-sndcard", "qcom,sm8450-sndcard";
 		model = "OnePlus-Pad-2-Pro";
-		audio-routing = "AMIC1", "MIC BIAS1",
+		audio-routing = "IN1_HPHL", "HPHL_OUT",
+				"IN2_HPHR", "HPHR_OUT",
+				"AMIC1", "MIC BIAS1",
+				"AMIC2", "MIC BIAS2",
+				"AMIC3", "MIC BIAS4",
+				"AMIC4", "MIC BIAS3",
 				"AMIC5", "MIC BIAS3",
 				"TX SWR_INPUT0", "ADC1_OUTPUT",
+				"TX SWR_INPUT1", "ADC2_OUTPUT",
+				"TX SWR_INPUT2", "ADC3_OUTPUT",
 				"TX SWR_INPUT3", "ADC4_OUTPUT";
 
 		pinctrl-0 = <&sec_tdm_active>;
@@ -66,6 +73,23 @@
 			};
 		};
 
+		/* USB-C analog headphones via WCD9395 HPH + usbss SBU switch */
+		wcd-playback-dai-link {
+			link-name = "WCD Playback";
+
+			cpu {
+				sound-dai = <&q6apmbedai RX_CODEC_DMA_RX_0>;
+			};
+
+			codec {
+				sound-dai = <&wcd939x 0>, <&swr1 0>, <&lpass_rxmacro 0>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+
 		wcd-capture-dai-link {
 			link-name = "WCD Capture";
 
@@ -74,7 +98,7 @@
 			};
 
 			codec {
-				sound-dai = <&wcd939x 1>, <&swr2 0>, <&lpass_txmacro 0>;
+				sound-dai = <&wcd939x 1>, <&swr2 1>, <&lpass_txmacro 0>;
 			};
 
 			platform {
@@ -933,7 +957,7 @@
 
 		vreg_l9b_2p9: ldo9 {
 			regulator-name = "vreg_l9b_2p9";
-			regulator-min-microvolt = <2960000>;
+			regulator-min-microvolt = <2800000>;
 			regulator-max-microvolt = <3008000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 			regulator-allow-set-load;
@@ -1396,6 +1420,77 @@
 	};
 };
 
+/*
+ * CPS8601 inductive pen charger (TX coil for the stylus). Five TLMM lines
+ * from the stock dtbo fragment@80: int 172, sleep 106, scan 56,
+ * off_state 107, sw_en 105. The chip carries factory firmware; the
+ * optional SRAM update image (wireless_pen/0/cps8601_firmware.bin) is
+ * not required for first bring-up.
+ */
+&i2c_hub_3 {
+	status = "okay";
+
+	cps8601: pen-charger@41 {
+		compatible = "oplus,wls-charger-cps8601";
+		reg = <0x41>;
+
+		int-gpios = <&tlmm 172 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&tlmm 106 GPIO_ACTIVE_HIGH>;
+		scan-gpios = <&tlmm 56 GPIO_ACTIVE_HIGH>;
+		boost-en-gpios = <&tlmm 107 GPIO_ACTIVE_HIGH>;
+		sw-en-gpios = <&tlmm 105 GPIO_ACTIVE_HIGH>;
+
+		oplus,ocp-threshold = <500>;
+		oplus,ovp-threshold = <12000>;
+		oplus,lvp-threshold = <4000>;
+		oplus,fod-threshold = <400>;
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * SuperVOOC fast charging - dual Southchip SC8547A charge pump (master+slave),
+ * ported from the 7.3-rc5 erhai tree (TheMojoMan, lab-validated 39 W PPS).
+ * Ground truth (live OxygenOS /proc/device-tree + stock dtbo fixups):
+ *   master oplus,sc8547a@6F on qupv3_hub_i2c8 == mainline i2c_hub_8 (@9a0000),
+ *          addr 0x6F, IRQ tlmm gpio163 (falling), ovp 0x36 ocp 0x0b
+ *   slave  sc8547-charger-slave@6F on qupv3_hub_i2c2 == mainline i2c_hub_2
+ *          (@988000), addr 0x6F, no IRQ ("oplus,slave").
+ * Both are SC8547A 2:1 pumps with an integrated VOOC serial PHY, driven
+ * AP-side by drivers/power/supply/sc8547a.c (CONFIG_CHARGER_SC8547A);
+ * the PPS host engine is erhai_pps.c (CONFIG_CHARGER_ERHAI_PPS).
+ * Stock runs both buses at 400 kHz (dtbo fragment@76 qcom,clk-freq-out);
+ * 100 kHz default kept as on the validated 7.3 tree - flip to 400 kHz by
+ * adding clock-frequency if the pump trace shows slow I2C.
+ */
+&i2c_hub_8 {
+	status = "okay";
+
+	sc8547a_master: charge-pump@6f {
+		compatible = "oplus,sc8547a";
+		reg = <0x6f>;
+
+		interrupts-extended = <&tlmm 163 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sc8547_int_active>;
+
+		sc,vbat-ovp-reg = /bits/ 8 <0x36>;
+		sc,ibus-ocp-reg = /bits/ 8 <0x0b>;
+	};
+};
+
+&i2c_hub_2 {
+	status = "okay";
+
+	sc8547a_slave: charge-pump@6f {
+		compatible = "oplus,sc8547a";
+		reg = <0x6f>;
+		oplus,slave;
+
+		sc,vbat-ovp-reg = /bits/ 8 <0x36>;
+		sc,ibus-ocp-reg = /bits/ 8 <0x0b>;
+	};
+};
+
 &i2c_hub_4 {
 	clock-frequency = <400000>;
 	status = "okay";
@@ -1764,6 +1859,25 @@
 &swr2 {
 	status = "okay";
 
+	/*
+	 * The TX soundwire controller reports one DOUT port, but the SoC
+	 * baseline declares none. With dout-ports = <0> the driver clears
+	 * the count, the WCD9395 TX codec cannot open its control port and
+	 * every capture start times out at the ADSP (APM port 120, -110).
+	 * Mirror the hamoa (X Elite) TX bus: one DOUT port first, then the
+	 * four stock DIN entries.
+	 */
+	qcom,dout-ports = <1>;
+	qcom,ports-sinterval-low =	/bits/ 8 <0x00 0x01 0x01 0x03 0x03>;
+	qcom,ports-offset1 =		/bits/ 8 <0x00 0x00 0x00 0x01 0x01>;
+	qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x00 0x00 0x00>;
+	qcom,ports-hstart =		/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-hstop =		/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-word-length =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-lane-control =	/bits/ 8 <0xff 0x01 0x02 0x00 0x00>;
+
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
@@ -1774,6 +1888,14 @@
 &tlmm {
 	/* reserved for secure world */
 	gpio-reserved-ranges = <36 4>, <74 1>;
+
+	sc8547_int_active: sc8547-int-active-state {
+		pins = "gpio163";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
 
 	qupv3_se4_spi: qupv3-se4-spi-state {
 		miso-pins {
@@ -2050,5 +2172,640 @@
 		bias-disable;
 		input-disable;
 		output-enable;
+	};
+};
+
+
+/*
+ * Camera stage-0 bring-up: PM8550 flash/torch and the rear CCI0 bus.
+ * Both are independent of CAMSS; the flash lights up via sysfs as soon
+ * as leds-qcom-flash binds, and CCI0 registers an i2c adapter so the
+ * rear sensor/EEPROM addresses can be probed with i2cdetect.
+ */
+/*
+ * sid-8 PM8550VE that carries the rear camera reset gpio (no mainline
+ * dtsi instantiates it; upstream sm8750-pmics only covers sid 5 = _f).
+ */
+&spmi_bus {
+	pm8550ve_i: pmic@8 {
+		compatible = "qcom,pm8550ve", "qcom,spmi-pmic";
+		reg = <0x8 SPMI_USID>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		pm8550ve_i_gpios: gpio@8800 {
+			compatible = "qcom,pm8550ve-gpio", "qcom,spmi-gpio";
+			reg = <0x8800>;
+			gpio-controller;
+			gpio-ranges = <&pm8550ve_i_gpios 0 0 8>;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+	};
+};
+
+&pm8550 {
+	flash-led@ee00 {
+		compatible = "qcom,pm8550-flash-led", "qcom,spmi-flash-led";
+		reg = <0xee00>;
+
+		/* bring-up: all four channels exposed separately so the wired
+		 * ones can be found at runtime; collapse once identified */
+		led-0 {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			function-enumerator = <1>;
+			led-sources = <1>;
+			led-max-microamp = <500000>;
+			flash-max-microamp = <1500000>;
+			flash-max-timeout-us = <1280000>;
+		};
+
+		led-1 {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			function-enumerator = <2>;
+			led-sources = <2>;
+			led-max-microamp = <500000>;
+			flash-max-microamp = <1500000>;
+			flash-max-timeout-us = <1280000>;
+		};
+
+		led-2 {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			function-enumerator = <3>;
+			led-sources = <3>;
+			led-max-microamp = <500000>;
+			flash-max-microamp = <1500000>;
+			flash-max-timeout-us = <1280000>;
+		};
+
+		led-3 {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			function-enumerator = <4>;
+			led-sources = <4>;
+			led-max-microamp = <500000>;
+			flash-max-microamp = <1500000>;
+			flash-max-timeout-us = <1280000>;
+		};
+	};
+};
+
+&tlmm {
+	cam_rear_mclk_default: cam-rear-mclk-default-state {
+		pins = "gpio90";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/*
+	 * CCI0 master 1 pins (rear camera + VCM).  Pull-up is mandatory:
+	 * bias-disable left SDA floating, and when cci_init() arms the full
+	 * IRQ error mask CCI flags a bus error on the floating line ->
+	 * HALT_REQ -> RESET -> RST_DONE storm = uninterruptible IRQ
+	 * livelock (TheMojoMan's Pad 3 finding).  The same state doubles as
+	 * sleep: it idles the bus high.
+	 */
+	cci0_i2c_sda1_default: cci0-i2c-sda1-default-state {
+		pins = "gpio115";
+		function = "cci_i2c_sda";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	cci0_i2c_scl1_default: cci0-i2c-scl1-default-state {
+		pins = "gpio116";
+		function = "cci_i2c_scl";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+};
+
+&soc {
+	/*
+	 * CCI0 — rear camera I2C (SC1320CS @0x36 + CN3927 VCM @0x0c on
+	 * master 1).  Node values are TheMojoMan's v491..v495 recipe,
+	 * verified on his Pad 3 (same panel of hardware): CPAS-TOP window,
+	 * the 10-clock set, the AHB/cam_hf/cam_sf interconnect votes and the
+	 * ICP-0 CAMNOC runtime rates.
+	 *
+	 * The erhai port of i2c-qcom-cci is now in the tree: it takes the
+	 * CPAS-TOP window and the AHB/cam_hf/cam_sf votes this node declares,
+	 * and gates the CSR write in probe behind erhai_cci_csr (default 0,
+	 * boot-safe).  See the status comment inside the node.
+	 */
+	cci0: cci@ac7b000 {
+		compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
+		/* reg[0] = CCI CSR; reg[1] = CPAS-TOP (qchannel wakeup).
+		 * NB cam_cpas_top MMIO is at ac04000, not ac13000. */
+		reg = <0 0x0ac7b000 0 0x1000>,
+		      <0 0x0ac04000 0 0x1000>;
+		reg-names = "cci", "cpas_top";
+		interrupts = <GIC_SPI 426 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
+
+		/* ahb opens the CPU->camera-cfg NoC path to the CSR;
+		 * cam_hf/cam_sf fire the RPMh CAMNOC BCM out of retention. */
+		interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+				 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+				<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
+				 &mmss_noc SLAVE_MNOC_HF_MEM_NOC QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
+				 &mmss_noc SLAVE_MNOC_SF_MEM_NOC QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "ahb", "cam_hf", "cam_sf";
+
+		clocks = <&camcc CAM_CC_CAMNOC_NRT_AXI_CLK>,
+			 <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
+			 <&camcc CAM_CC_CORE_AHB_CLK>,
+			 <&camcc CAM_CC_CCI_0_CLK>,
+			 <&camcc CAM_CC_ICP_0_AHB_CLK>,
+			 <&camcc CAM_CC_ICP_0_CLK>,
+			 <&camcc CAM_CC_CAMNOC_RT_AXI_CLK>,
+			 <&gcc GCC_CAMERA_AHB_CLK>,
+			 <&gcc GCC_CAMERA_HF_AXI_CLK>,
+			 <&gcc GCC_CAMERA_SF_AXI_CLK>;
+		clock-names = "camnoc_axi", "cpas_ahb", "cpas_core_ahb", "cci",
+			      "icp_ahb", "icp", "camnoc_rt",
+			      "gcc_cam_ahb", "gcc_cam_hf_axi", "gcc_cam_sf_axi";
+		assigned-clocks = <&camcc CAM_CC_CCI_0_CLK_SRC>,
+				  <&camcc CAM_CC_ICP_0_CLK_SRC>,
+				  <&camcc CAM_CC_CAMNOC_RT_AXI_CLK_SRC>;
+		assigned-clock-rates = <37500000>,
+				       <300000000>,
+				       <400000000>;
+
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&cci0_i2c_sda1_default &cci0_i2c_scl1_default>;
+		pinctrl-1 = <&cci0_i2c_sda1_default &cci0_i2c_scl1_default>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* The sc1320cs/cn3927 drivers are in the tree; enable CCI.
+		 * The erhai i2c-qcom-cci port defaults to erhai_cci_csr=0
+		 * (boot-safe: clocks+votes only, no CSR bring-up at probe);
+		 * erhai-boot-heal rebinds with erhai_cci_csr=1 once the
+		 * system is up, where a hang only costs a reboot. */
+		status = "okay";
+
+		/*
+		 * master[0] MUST exist even though the sensors sit on
+		 * master 1: cci_reset() waits on master[0].irq_complete,
+		 * which is only initialised for masters with an i2c-bus
+		 * child.  An empty bus@0 avoids the OOPS; nothing xfers
+		 * on it.
+		 */
+		cci0_i2c0: i2c-bus@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		cci0_i2c1: i2c-bus@1 {
+			reg = <1>;
+			/* FAST (400 kHz) is the fastest this bus sustains;
+			 * FAST_PLUS never meets VIH.  Downstream default. */
+			clock-frequency = <400000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			sc1320cs: camera-sensor@36 {
+				compatible = "smartsens,sc1320cs";
+				reg = <0x36>;
+
+				clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK1_CLK>;
+				clock-names = "cam_clk";
+				assigned-clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK1_CLK>;
+				assigned-clock-rates = <19200000>;
+
+				pinctrl-names = "default";
+				pinctrl-0 = <&cam_rear_mclk_default>;
+
+				/* The MCLK gates live inside TITAN_TOP_GDSC: without the
+				 * domain on, the branch is hw-protected and
+				 * clk_prepare_enable returns -EBUSY. */
+				power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
+
+				reset-gpios = <&pm8550ve_i_gpios 5 GPIO_ACTIVE_LOW>;
+
+				/* Rear-facing module. */
+				orientation = <1>;
+				rotation = <0>;
+
+				cam_vana-supply = <&vreg_l16b_2p8>;
+				cam_vio-supply  = <&vreg_l4b_1p8>;
+				cam_vdig-supply = <&vreg_l1i_1p2>;
+				cam_vaf-supply  = <&vreg_l9b_2p9>;
+
+				/* Rear AF voice-coil motor (CCI0-m1 @0x0c). */
+				lens-focus = <&vcm>;
+
+				/* MIPI CSI-2 D-PHY 4-lane out -> CAMSS CSIPHY4.
+				 * Android CAM_START_PHYDEV for PHY-4:
+				 * 1200 Mbps/lane -> DDR link clock 600 MHz. */
+				port {
+					sc1320cs_ep: endpoint {
+						remote-endpoint = <&camss_csiphy4>;
+						data-lanes = <0 1 2 3>;
+						link-frequencies = /bits/ 64 <600000000>;
+					};
+				};
+			};
+
+			/*
+			 * Rear AF VCM, CN3927 protocol (unlock 0xed, DAC
+			 * position regs 0x03/0x04), verified via i2ctransfer
+			 * on the Pad 3.  The VAF rail is shared with the
+			 * sensor; the regulator core refcounts it.
+			 */
+			vcm: lens@c {
+				compatible = "chipnext,cn3927";
+				reg = <0x0c>;
+
+				vio-supply = <&vreg_l4b_1p8>;
+				vaf-supply = <&vreg_l9b_2p9>;
+			};
+		};
+	};
+
+	/*
+	 * CAMSS — full qcom,sm8750-camss binding node.
+	 *
+	 * Rewritten to the official SM8750 CAMSS DT binding
+	 * (Documentation/devicetree/bindings/media/qcom,sm8750-camss.yaml):
+	 * 19 reg windows, 35 clocks, 16 IRQs, 4 interconnect paths and the
+	 * 4-GDSC power-domain set (ife0/ife1/ife2/top).  Bases, IRQs and clock
+	 * names are cross-checked against the live Android DT (dtbo fragment@91):
+	 *   csid0/1/2     ad27000/ad2a000/ad2d000 (0x2b00)   irq 601/603/431
+	 *   csid_lite0/1  ad6d000/ad72000 (0xa00)            irq 605/376
+	 *   csiphy0-5     ada9000..adb3000 (0x2000)          irq 477/478/479/448/122/89
+	 *   csitpg0-2     ad8b000/ad8c000/ad8d000 (0x400)
+	 *   vfe0/1/2      ac86000/ac96000/aca6000 (0x10000)  irq 433/436/457
+	 *   vfe_lite0/1   ad6e000/ad73000 (0x3000)           irq 606/377
+	 *
+	 * The vfe_lite windows come from the official binding example, not the
+	 * vendor dtbo: the vendor layout (ad6d000/ad72000, 0x2800) overlaps the
+	 * csid_lite windows (0xa00), and the mainline driver
+	 * devm_request_mem_region()s each subdev window independently, so an
+	 * overlap fails with -EBUSY.  Independent windows are the working
+	 * arrangement; do not "restore" the downstream addresses.
+	 *
+	 * The in-tree driver (csiphy_res_8750/csid_res_8750/icc_res_sm8750,
+	 * official v5 patch set) only instantiates CSIPHY + CSID entities and
+	 * consumes the "top" power domain plus the "ahb"/"hf_mnoc" ICC paths;
+	 * the remaining windows/clocks/PDs satisfy the binding and sit ready
+	 * for the full TFE driver.
+	 *
+	 * CSIPHY analog rails follow the vendor wiring (dtbo regulator symbols:
+	 * 0p9 = L1F on phy0/1/3/5 / L3I on phy2/4, 1p2 = L3G on all six).
+	 *
+	 * SMMU SID 0x1c00 from the live Android DT (cam_smmu_ife context
+	 * bank, mask 0x0 as Android has it).  Without it VIDIOC_REQBUFS
+	 * falls back to swiotlb and a 16 MB RAW frame never fits.
+	 */
+	camss: isp@ad27000 {
+		compatible = "qcom,sm8750-camss";
+
+		reg = <0 0x0ad27000 0 0x2b00>,
+		      <0 0x0ad2a000 0 0x2b00>,
+		      <0 0x0ad2d000 0 0x2b00>,
+		      <0 0x0ad6d000 0 0xa00>,
+		      <0 0x0ad72000 0 0xa00>,
+		      <0 0x0ada9000 0 0x2000>,
+		      <0 0x0adab000 0 0x2000>,
+		      <0 0x0adad000 0 0x2000>,
+		      <0 0x0adaf000 0 0x2000>,
+		      <0 0x0adb1000 0 0x2000>,
+		      <0 0x0adb3000 0 0x2000>,
+		      <0 0x0ad8b000 0 0x400>,
+		      <0 0x0ad8c000 0 0x400>,
+		      <0 0x0ad8d000 0 0x400>,
+		      <0 0x0ac86000 0 0x10000>,
+		      <0 0x0ac96000 0 0x10000>,
+		      <0 0x0aca6000 0 0x10000>,
+		      <0 0x0ad6e000 0 0x3000>,
+		      <0 0x0ad73000 0 0x3000>;
+		reg-names = "csid0",
+		            "csid1",
+		            "csid2",
+		            "csid_lite0",
+		            "csid_lite1",
+		            "csiphy0",
+		            "csiphy1",
+		            "csiphy2",
+		            "csiphy3",
+		            "csiphy4",
+		            "csiphy5",
+		            "csitpg0",
+		            "csitpg1",
+		            "csitpg2",
+		            "vfe0",
+		            "vfe1",
+		            "vfe2",
+		            "vfe_lite0",
+		            "vfe_lite1";
+
+		clocks = <&camcc CAM_CC_CAMNOC_NRT_AXI_CLK>,
+		         <&camcc CAM_CC_CAMNOC_RT_AXI_CLK>,
+		         <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
+		         <&camcc CAM_CC_CAM_TOP_FAST_AHB_CLK>,
+		         <&camcc CAM_CC_CAMNOC_RT_TFE_0_MAIN_CLK>,
+		         <&camcc CAM_CC_CAMNOC_RT_TFE_1_MAIN_CLK>,
+		         <&camcc CAM_CC_CAMNOC_RT_TFE_2_MAIN_CLK>,
+		         <&camcc CAM_CC_CAMNOC_RT_IFE_LITE_CLK>,
+		         <&camcc CAM_CC_CSID_CLK>,
+		         <&camcc CAM_CC_CSID_CSIPHY_RX_CLK>,
+		         <&camcc CAM_CC_CSIPHY0_CLK>,
+		         <&camcc CAM_CC_CSI0PHYTIMER_CLK>,
+		         <&camcc CAM_CC_CSIPHY1_CLK>,
+		         <&camcc CAM_CC_CSI1PHYTIMER_CLK>,
+		         <&camcc CAM_CC_CSIPHY2_CLK>,
+		         <&camcc CAM_CC_CSI2PHYTIMER_CLK>,
+		         <&camcc CAM_CC_CSIPHY3_CLK>,
+		         <&camcc CAM_CC_CSI3PHYTIMER_CLK>,
+		         <&camcc CAM_CC_CSIPHY4_CLK>,
+		         <&camcc CAM_CC_CSI4PHYTIMER_CLK>,
+		         <&camcc CAM_CC_CSIPHY5_CLK>,
+		         <&camcc CAM_CC_CSI5PHYTIMER_CLK>,
+		         <&gcc GCC_CAMERA_HF_AXI_CLK>,
+		         <&gcc GCC_CAMERA_SF_AXI_CLK>,
+		         <&camcc CAM_CC_TFE_0_MAIN_CLK>,
+		         <&camcc CAM_CC_TFE_0_MAIN_FAST_AHB_CLK>,
+		         <&camcc CAM_CC_TFE_1_MAIN_CLK>,
+		         <&camcc CAM_CC_TFE_1_MAIN_FAST_AHB_CLK>,
+		         <&camcc CAM_CC_TFE_2_MAIN_CLK>,
+		         <&camcc CAM_CC_TFE_2_MAIN_FAST_AHB_CLK>,
+		         <&camcc CAM_CC_IFE_LITE_CLK>,
+		         <&camcc CAM_CC_IFE_LITE_AHB_CLK>,
+		         <&camcc CAM_CC_IFE_LITE_CPHY_RX_CLK>,
+		         <&camcc CAM_CC_IFE_LITE_CSID_CLK>,
+		         <&camcc CAM_CC_QDSS_DEBUG_XO_CLK>;
+		clock-names = "camnoc_nrt_axi",
+		              "camnoc_rt_axi",
+		              "cpas_ahb",
+		              "cpas_fast_ahb",
+		              "cpas_vfe0",
+		              "cpas_vfe1",
+		              "cpas_vfe2",
+		              "cpas_vfe_lite",
+		              "csid",
+		              "csid_csiphy_rx",
+		              "csiphy0",
+		              "csiphy0_timer",
+		              "csiphy1",
+		              "csiphy1_timer",
+		              "csiphy2",
+		              "csiphy2_timer",
+		              "csiphy3",
+		              "csiphy3_timer",
+		              "csiphy4",
+		              "csiphy4_timer",
+		              "csiphy5",
+		              "csiphy5_timer",
+		              "gcc_axi_hf",
+		              "gcc_axi_sf",
+		              "vfe0",
+		              "vfe0_fast_ahb",
+		              "vfe1",
+		              "vfe1_fast_ahb",
+		              "vfe2",
+		              "vfe2_fast_ahb",
+		              "vfe_lite",
+		              "vfe_lite_ahb",
+		              "vfe_lite_cphy_rx",
+		              "vfe_lite_csid",
+		              "qdss_debug_xo";
+
+		interrupts = <GIC_SPI 601 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 603 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 431 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 605 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 376 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 122 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 89 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 433 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 436 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 457 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 606 IRQ_TYPE_EDGE_RISING>,
+		             <GIC_SPI 377 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "csid0",
+		                  "csid1",
+		                  "csid2",
+		                  "csid_lite0",
+		                  "csid_lite1",
+		                  "csiphy0",
+		                  "csiphy1",
+		                  "csiphy2",
+		                  "csiphy3",
+		                  "csiphy4",
+		                  "csiphy5",
+		                  "vfe0",
+		                  "vfe1",
+		                  "vfe2",
+		                  "vfe_lite0",
+		                  "vfe_lite1";
+
+		interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+				 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+				<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+				<&mmss_noc MASTER_CAMNOC_NRT_ICP_SF QCOM_ICC_TAG_ALWAYS
+				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
+		interconnect-names = "ahb", "hf_mnoc",
+				      "sf_mnoc", "sf_icp_mnoc";
+
+		iommus = <&apps_smmu 0x1c00 0x0>;
+		dma-coherent;
+
+		power-domains = <&camcc CAM_CC_TFE_0_GDSC>,
+		                <&camcc CAM_CC_TFE_1_GDSC>,
+		                <&camcc CAM_CC_TFE_2_GDSC>,
+		                <&camcc CAM_CC_TITAN_TOP_GDSC>;
+		power-domain-names = "ife0",
+		                     "ife1",
+		                     "ife2",
+		                     "top";
+
+		vdd-csiphy0-0p9-supply = <&vreg_l1f_0p88>;
+		vdd-csiphy1-0p9-supply = <&vreg_l1f_0p88>;
+		vdd-csiphy2-0p9-supply = <&vreg_l3i_0p88>;
+		vdd-csiphy3-0p9-supply = <&vreg_l1f_0p88>;
+		vdd-csiphy4-0p9-supply = <&vreg_l3i_0p88>;
+		vdd-csiphy5-0p9-supply = <&vreg_l1f_0p88>;
+		vdd-csiphy0-1p2-supply = <&vreg_l3g_1p2>;
+		vdd-csiphy1-1p2-supply = <&vreg_l3g_1p2>;
+		vdd-csiphy2-1p2-supply = <&vreg_l3g_1p2>;
+		vdd-csiphy3-1p2-supply = <&vreg_l3g_1p2>;
+		vdd-csiphy4-1p2-supply = <&vreg_l3g_1p2>;
+		vdd-csiphy5-1p2-supply = <&vreg_l3g_1p2>;
+
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Rear SC1320CS; the sc1320cs/cn3927 drivers are in
+			 * the tree now, so the remote completes the async
+			 * notifier (it sat parked until then — a never-arriving
+			 * remote blocked .complete for every camera). */
+			port@4 {
+				reg = <4>;
+
+				camss_csiphy4: endpoint {
+					remote-endpoint = <&sc1320cs_ep>;
+					data-lanes = <0 1 2 3>;
+				};
+			};
+
+			port@5 {
+				reg = <5>;
+
+				camss_csiphy5: endpoint {
+					remote-endpoint = <&sc820cs_out>;
+					data-lanes = <0 1 2 3>;
+				};
+			};
+		};
+	};
+};
+
+/*
+ * Camera stage-1 bring-up: front sensor SmartSens SC820CS on the plain
+ * QUP2 SE1 I2C bus (not CCI - the vendor tree wires the front camera to
+ * qupv3_se9_i2c, gpio4 SDA / gpio5 SCL, which is mainline i2c9).
+ *
+ * Hardware facts from the vendor erhai_camera_overlay_common_evb.dtsi
+ * (extracted in ~/erhai-pen/sc820cs-notes.md):
+ *   RESET4 = tlmm gpio7, MCLK4 = tlmm gpio93 @ 19.2 MHz
+ *   (cambistmclkcc CAM_BIST_MCLK_CC_MCLK4_CLK; the 19.2 MHz tap exists in
+ *   its freq table straight off bi_tcxo_div2: xo 76.8M -> rpmhcc div2
+ *   38.4M -> dtsi div2 19.2M).
+ * Regulator mapping from the vendor DT (also recorded in the driver
+ * header comment, drivers/media/i2c/sc820cs.c):
+ *   DOVDD 1.8 V = L4B, AVDD 2.8 V = L16B, DVDD 1.2 V = L11B.
+ *
+ * reset-gpios is ACTIVE_LOW because the sensor reset input is active-low
+ * and the driver uses proper gpiod logical semantics (set_value(1)
+ * asserts, set_value(0) releases; consumer.rst active_low_semantics).
+ * Never describe this line with raw physical levels again - reasoning in
+ * physical levels is exactly what inverted the sequence twice.
+ *
+ * Bring-up TODOs:
+ *   - CSI hookup DONE (below): sc820cs_out -> camss_csiphy5, values from
+ *     TheMojoMan's verified Pad 3 tree.  The camss and cci0 nodes are
+ *     enabled; erhai-boot-heal arms the CCI CSR after boot.
+ */
+&gpi_dma2 {
+	status = "okay";
+};
+
+&tlmm {
+	cam_mclk4_default: cam-mclk4-default-state {
+		pins = "gpio93";
+		function = "cam_aon_mclk4";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&i2c9 {
+	status = "okay";
+
+	/* 7-bit address.  The vendor dtbo's 0x20 is the 8-bit WRITE address
+	 * form; the sensor only ACKs its 7-bit address 0x10 on Linux (same
+	 * finding as TheMojoMan's verified Pad 3 tree). */
+	front_cam: camera-sensor@10 {
+		compatible = "smartsens,sc820cs";
+		reg = <0x10>;
+
+		/*
+		 * The sensor's 0x00 state already streams upright (verified
+		 * with the ceiling-lamp centroid + the register sweep that
+		 * decoded 0x3221 bit5=V-flip, bit2=H-mirror).  GNOME Snapshot
+		 * still shows it upside-down because it applies the customary
+		 * 180° correction to any camera declared FRONT (front modules
+		 * are usually mounted inverted).  Declare the camera EXTERNAL
+		 * so no front-facing correction is applied and the upright
+		 * frame passes through untouched.
+		 */
+		orientation = <2>;
+		rotation = <0>;
+
+		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
+
+		dovdd-supply = <&vreg_l4b_1p8>;
+		avdd-supply = <&vreg_l16b_2p8>;
+		dvdd-supply = <&vreg_l11b_1p0>;
+
+		/*
+		 * The MCLK gates in cambistmclkcc (0x1760000) live inside the
+		 * CAM_CC_TITAN_TOP_GDSC power domain: the vendor DT feeds this
+		 * GDSC to the sensor node as cam_clk-supply.  With the domain
+		 * off, the MCLK branch enable bit does not latch and
+		 * clk_prepare_enable() fails with -EBUSY.  The i2c core powers
+		 * the domain on before calling probe (PD_FLAG_ATTACH_POWER_ON),
+		 * and the driver's runtime PM keeps it aligned afterwards.
+		 */
+		power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
+
+		clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK4_CLK>;
+		assigned-clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK4_CLK_SRC>;
+		assigned-clock-rates = <19200000>;
+
+		pinctrl-0 = <&cam_mclk4_default>;
+		pinctrl-names = "default";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				/* MIPI CSI-2 D-PHY 4-lane out -> CAMSS CSIPHY5.
+				 * Link rate ground truth: Android CAM_START_PHYDEV
+				 * for PHY-5 on this tablet is 736 Mbps/lane, so the
+				 * DDR link clock is 368 MHz (same figure TheMojoMan's
+				 * verified Pad 3 tree ships; the earlier 366 MHz was
+				 * borrowed from caihong and never verified on erhai).
+				 * camss takes the rate from the sensor's
+				 * V4L2_CID_LINK_FREQ, keep the two in step. */
+				sc820cs_out: endpoint {
+					remote-endpoint = <&camss_csiphy5>;
+					data-lanes = <0 1 2 3>;
+					link-frequencies = /bits/ 64 <368000000>;
+				};
+			};
+		};
+	};
+};
+
+/* Crash record capture for the intermittent early-boot wedge: the kernel
+ * has CONFIG_PSTORE_RAM=y but no region, so forced reboots leave nothing in
+ * /sys/fs/pstore.  Park 1 MiB at the top of the last System RAM block
+ * (0xbfff00000..0xbffffffff per /proc/iomem); warm resets (panic, watchdog,
+ * reboot -f) survive there and cold boots simply start empty. */
+/ {
+	reserved-memory {
+		ramoops@bfff00000 {
+			compatible = "ramoops";
+			reg = <0xb 0xfff00000 0x0 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x0>;
+			pmsg-size = <0x20000>;
+			ecc-size = <0x0>;
+		};
 	};
 };
