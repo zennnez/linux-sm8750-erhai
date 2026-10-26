@@ -20,6 +20,7 @@
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_probe_helper.h>
 
 struct novatek_nt36536 {
 	struct drm_panel panel;
@@ -307,37 +308,18 @@ static const struct drm_display_mode novatek_nt36536_mode = {
 	.vsync_start = 2400 + 26,
 	.vsync_end = 2400 + 26 + 2,
 	.vtotal = 2400 + 26 + 2 + 230,
-	.type = DRM_MODE_TYPE_DRIVER,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
-
-/* Stock 120/60/30 Hz timings keep the link clock and horizontal timing fixed. */
-static const unsigned int novatek_nt36536_vfp[] = { 26, 2684, 8000 };
 
 static int novatek_nt36536_get_modes(struct drm_panel *panel,
 				     struct drm_connector *connector)
 {
-	struct drm_display_mode *mode;
-	unsigned int i;
-
 	connector->display_info.width_mm = 274;
 	connector->display_info.height_mm = 193;
 	connector->display_info.bpc = 8;
 
-	for (i = 0; i < ARRAY_SIZE(novatek_nt36536_vfp); i++) {
-		mode = drm_mode_duplicate(connector->dev, &novatek_nt36536_mode);
-		if (!mode)
-			return i;
-
-		mode->vsync_start = mode->vdisplay + novatek_nt36536_vfp[i];
-		mode->vsync_end = mode->vsync_start + 2;
-		mode->vtotal = mode->vsync_end + 230;
-		if (!i)
-			mode->type |= DRM_MODE_TYPE_PREFERRED;
-		drm_mode_set_name(mode);
-		drm_mode_probed_add(connector, mode);
-	}
-
-	return ARRAY_SIZE(novatek_nt36536_vfp);
+	return drm_connector_helper_get_modes_fixed(connector,
+						    &novatek_nt36536_mode);
 }
 
 static const struct drm_panel_funcs novatek_nt36536_panel_funcs = {
